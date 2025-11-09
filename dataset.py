@@ -23,6 +23,12 @@ class ScienceQADataset(Dataset):
         # Create a blank image if none is provided
         if image is None:
             image = Image.new('RGB', (self.processor.image_processor.size['height'], self.processor.image_processor.size['width']), color='white')
+        # Pad choices to NUM_CHOICES
+        num_choices = len(choices)
+        num_padding = self.config.NUM_CHOICES - num_choices
+        if num_padding > 0:
+            # Pad with empty strings (will be masked out)
+            choices = choices + [''] * num_padding
 
         # The core idea: create one input sequence for each choice
         # The model will learn to score the sequence "[QUESTION] [SEP] [CHOICE]"

@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from transformers import BlipProcessor, AdamW, get_linear_schedule_with_warmup
+from torch.optim import AdamW
+from transformers import BlipProcessor, get_linear_schedule_with_warmup
 from tqdm import tqdm
 import wandb
 import numpy as np
 
+import config
 from config import *
 from dataset import ScienceQADataset
 from model import BlipForMultipleChoice
@@ -14,8 +16,8 @@ def train():
     """
     Main training function.
     """
-    # Initialize WandB
-    wandb.init(project=WANDB_PROJECT_NAME, config={
+    # Initialize WandB (offline mode to avoid interactive prompts)
+    wandb.init(project=WANDB_PROJECT_NAME, mode="offline", config={
         "learning_rate": LEARNING_RATE,
         "batch_size": BATCH_SIZE,
         "epochs": NUM_EPOCHS,
@@ -27,8 +29,8 @@ def train():
     model = BlipForMultipleChoice(MODEL_NAME, NUM_CHOICES).to(DEVICE)
 
     # Load datasets
-    train_dataset = ScienceQADataset(split=TRAIN_SPLIT, processor=processor, config=globals())
-    val_dataset = ScienceQADataset(split=VAL_SPLIT, processor=processor, config=globals())
+    train_dataset = ScienceQADataset(split=TRAIN_SPLIT, processor=processor, config=config)
+    val_dataset = ScienceQADataset(split=VAL_SPLIT, processor=processor, config=config)
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)

@@ -4,6 +4,7 @@ from transformers import BlipProcessor
 from tqdm import tqdm
 from sklearn.metrics import classification_report
 
+import config
 from config import *
 from dataset import ScienceQADataset
 from model import BlipForMultipleChoice
@@ -27,7 +28,7 @@ def run_evaluation():
         return
 
     # 2. Load the test dataset
-    test_dataset = ScienceQADataset(split=TEST_SPLIT, processor=processor, config=globals())
+    test_dataset = ScienceQADataset(split=TEST_SPLIT, processor=processor, config=config)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
 
     # 3. Run evaluation

@@ -1,11 +1,7 @@
 import argparse
-import sys
 
-# Add the source directory to the Python path
-sys.path.append('src')
-
-from src.train import train
-from src.evaluate import run_evaluation
+from train import train
+from evaluate import run_evaluation
 
 def main():
     """
