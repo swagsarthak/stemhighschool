@@ -1,5 +1,6 @@
 import torch
 from torch.utils.data import DataLoader
+from torch import amp
 from transformers import BlipProcessor
 from tqdm import tqdm
 from sklearn.metrics import classification_report
@@ -16,7 +17,7 @@ def run_evaluation():
     print("--- Starting Evaluation on Test Set ---")
     
     # 1. Load processor and model
-    processor = BlipProcessor.from_pretrained(MODEL_NAME)
+    processor = BlipProcessor.from_pretrained(MODEL_NAME, use_fast=True)
     model = BlipForMultipleChoice(MODEL_NAME, NUM_CHOICES).to(DEVICE)
     
     try:
@@ -29,7 +30,16 @@ def run_evaluation():
 
     # 2. Load the test dataset
     test_dataset = ScienceQADataset(split=TEST_SPLIT, processor=processor, config=config)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
+    loader_kwargs = dict(
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
+        persistent_workers=PERSISTENT_WORKERS and NUM_WORKERS > 0,
+    )
+    test_loader = DataLoader(test_dataset, **loader_kwargs)
+    non_blocking = IS_CUDA and PIN_MEMORY
+    amp_enabled = USE_AMP and IS_CUDA
+    amp_device = "cuda" if IS_CUDA else "cpu"
 
     # 3. Run evaluation
     model.eval()
@@ -39,14 +49,11 @@ def run_evaluation():
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Evaluating on Test Set"):
             inputs, labels = batch
-            inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
-            labels = labels.to(DEVICE)
+            inputs = {k: v.to(DEVICE, non_blocking=non_blocking) for k, v in inputs.items()}
+            labels = labels.to(DEVICE, non_blocking=non_blocking)
 
-            logits = model(
-                pixel_values=inputs['pixel_values'],
-                input_ids=inputs['input_ids'],
-                attention_mask=inputs['attention_mask']
-            )
+            with amp.autocast(device_type=amp_device, enabled=amp_enabled):
+                logits = model(**inputs)
             
             predictions = torch.argmax(logits, dim=1)
             

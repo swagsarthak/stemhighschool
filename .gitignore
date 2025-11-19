@@ -1,0 +1,13 @@
+# Virtual environments
+.venv/
+
+# Python cache and bytecode
+__pycache__/
+*.pyc
+
+# Training outputs and logs
+outputs/
+wandb/
+
+# OS/filesystem noise
+.DS_Store
