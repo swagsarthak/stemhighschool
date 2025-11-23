@@ -19,7 +19,14 @@ sys.path = [
 import wandb
 
 import config
-from config import *
+from config import (
+    LEARNING_RATE, BATCH_SIZE, NUM_EPOCHS, WEIGHT_DECAY, OPTIMIZER,
+    TRAINING_STRATEGY, MODEL_DROPOUT, LABEL_SMOOTHING, EARLY_STOP_PATIENCE,
+    EARLY_STOP_MIN_DELTA, DEVICE, IS_CUDA, USE_AMP, NUM_WORKERS, PIN_MEMORY,
+    PERSISTENT_WORKERS, TRAIN_SPLIT, VAL_SPLIT, OUTPUT_DIR, MODEL_SAVE_PATH,
+    WANDB_PROJECT_NAME, MODEL_NAME, NUM_CHOICES, GRADIENT_ACCUMULATION_STEPS,
+    WARMUP_STEPS, GRADIENT_CLIP_VAL, BACKBONE_LR_MULTIPLIER, CLASSIFIER_LR_MULTIPLIER
+)
 from dataset import ScienceQADataset
 from model import BlipForMultipleChoice
 
@@ -72,24 +79,57 @@ def train():
     train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_dataset, **loader_kwargs)
 
-    # Optimizer and Scheduler
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    # Optimizer with differential learning rates for backbone vs classifier
+    # Separate parameters for backbone and classifier to use different learning rates
+    backbone_params = []
+    classifier_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if 'blip' in name:
+            backbone_params.append(param)
+        else:
+            classifier_params.append(param)
+    
+    # Create parameter groups with different learning rates
+    param_groups = []
+    if backbone_params:
+        param_groups.append({
+            'params': backbone_params,
+            'lr': LEARNING_RATE * BACKBONE_LR_MULTIPLIER,
+            'weight_decay': WEIGHT_DECAY
+        })
+        print(f"Backbone LR: {LEARNING_RATE * BACKBONE_LR_MULTIPLIER:.2e} ({len(backbone_params)} params)")
+    
+    if classifier_params:
+        param_groups.append({
+            'params': classifier_params,
+            'lr': LEARNING_RATE * CLASSIFIER_LR_MULTIPLIER,
+            'weight_decay': WEIGHT_DECAY
+        })
+        print(f"Classifier LR: {LEARNING_RATE * CLASSIFIER_LR_MULTIPLIER:.2e} ({len(classifier_params)} params)")
+    
     if OPTIMIZER.lower() == "adafactor":
         optimizer = Adafactor(
-            trainable_params,
-            lr=LEARNING_RATE,
-            weight_decay=WEIGHT_DECAY,
-            relative_step=False,  # Keep explicit LR for reproducibility
+            param_groups,
+            lr=LEARNING_RATE,  # This is just for initialization, actual LRs are in param_groups
+            relative_step=False,
             scale_parameter=False,
         )
         print("Using Adafactor optimizer (memory-efficient).")
     else:
-        optimizer = AdamW(trainable_params, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+        optimizer = AdamW(param_groups)
         if OPTIMIZER.lower() != "adamw":
             print(f"Unknown OPTIMIZER '{OPTIMIZER}', defaulting to AdamW.")
 
-    total_steps = len(train_loader) * NUM_EPOCHS
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
+    # Calculate total steps accounting for gradient accumulation
+    steps_per_epoch = (len(train_loader) + GRADIENT_ACCUMULATION_STEPS - 1) // GRADIENT_ACCUMULATION_STEPS
+    total_steps = steps_per_epoch * NUM_EPOCHS
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, 
+        num_warmup_steps=WARMUP_STEPS, 
+        num_training_steps=total_steps
+    )
     loss_fn = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
     scaler = amp.GradScaler(device="cuda", enabled=USE_AMP and IS_CUDA)
     amp_device = "cuda" if IS_CUDA else "cpu"
@@ -101,26 +141,73 @@ def train():
     # Training Loop
     for epoch in range(NUM_EPOCHS):
         model.train()
-        total_loss = 0
-        for batch in tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{NUM_EPOCHS}"):
+        total_loss = 0.0
+        num_valid_batches = 0
+        global_step = 0
+        accumulated_grad_norms = []
+        
+        optimizer.zero_grad()
+        
+        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{NUM_EPOCHS}")):
             inputs, labels = batch
             inputs = {k: v.to(DEVICE, non_blocking=non_blocking) for k, v in inputs.items()}
             labels = labels.to(DEVICE, non_blocking=non_blocking)
 
-            optimizer.zero_grad()
-
             with amp.autocast(device_type=amp_device, enabled=scaler.is_enabled()):
                 logits = model(**inputs)
                 loss = loss_fn(logits, labels)
-            total_loss += loss.item()
+                # Normalize loss for gradient accumulation
+                loss = loss / GRADIENT_ACCUMULATION_STEPS
+            
+            # Check for NaN or Inf loss
+            if torch.isnan(loss) or torch.isinf(loss) or loss.item() > 1e6:
+                print(f"WARNING: Invalid loss detected: {loss.item()}. Skipping batch.")
+                continue
             
             scaler.scale(loss).backward()
+            
+            # Track loss (denormalized)
+            batch_loss = loss.item() * GRADIENT_ACCUMULATION_STEPS
+            if not (np.isnan(batch_loss) or np.isinf(batch_loss)):
+                total_loss += batch_loss
+                num_valid_batches += 1
+            
+            # Accumulate gradients
+            if (batch_idx + 1) % GRADIENT_ACCUMULATION_STEPS == 0:
+                # Clip gradients to prevent explosion
+                scaler.unscale_(optimizer)
+                
+                # Calculate gradient norm before clipping
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_VAL)
+                accumulated_grad_norms.append(grad_norm.item())
+                
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                optimizer.zero_grad()
+                global_step += 1
+        
+        # Handle remaining gradients at end of epoch if any
+        if len(train_loader) % GRADIENT_ACCUMULATION_STEPS != 0:
+            scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_VAL)
+            accumulated_grad_norms.append(grad_norm.item())
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
+            optimizer.zero_grad()
+            global_step += 1
 
-        avg_train_loss = total_loss / len(train_loader)
-        print(f"Epoch {epoch+1} | Average Training Loss: {avg_train_loss:.4f}")
+        # Handle case where all batches were skipped
+        if num_valid_batches == 0:
+            print(f"WARNING: No valid batches in epoch {epoch+1}. Loss may be unstable.")
+            avg_train_loss = float('inf')
+            avg_grad_norm = 0.0
+        else:
+            avg_train_loss = total_loss / num_valid_batches
+            avg_grad_norm = np.mean(accumulated_grad_norms) if accumulated_grad_norms else 0.0
+        
+        print(f"Epoch {epoch+1} | Average Training Loss: {avg_train_loss:.4f} | Avg Gradient Norm: {avg_grad_norm:.4f}")
 
         # Validation
         val_accuracy = evaluate_performance(
@@ -132,7 +219,13 @@ def train():
         )
         print(f"Epoch {epoch+1} | Validation Accuracy: {val_accuracy:.4f}")
 
-        wandb.log({"epoch": epoch + 1, "train_loss": avg_train_loss, "val_accuracy": val_accuracy})
+        wandb.log({
+            "epoch": epoch + 1, 
+            "train_loss": avg_train_loss if not np.isinf(avg_train_loss) else 1e6, 
+            "val_accuracy": val_accuracy,
+            "gradient_norm": avg_grad_norm,
+            "learning_rate": scheduler.get_last_lr()[0]
+        })
 
         # Save the best model
         improved = val_accuracy > best_val_accuracy + EARLY_STOP_MIN_DELTA
