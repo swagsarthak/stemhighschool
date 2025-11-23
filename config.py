@@ -3,12 +3,16 @@ import torch
 # -- Training & Model Parameters --
 MODEL_NAME = "Salesforce/blip-vqa-base"
 NUM_CHOICES = 5  # Max number of choices in ScienceQA
-LEARNING_RATE = 3e-5
+LEARNING_RATE = 2e-5  # Slightly lower to curb overfitting
 BATCH_SIZE = 2  # Lower to reduce GPU/CPU memory pressure
 NUM_EPOCHS = 3
 WEIGHT_DECAY = 0.01
 OPTIMIZER = "adamw"  # Options: "adamw", "adafactor"
 TRAINING_STRATEGY = "full"  # Options: "full", "linear_probe" (freeze BLIP and train classifier only)
+MODEL_DROPOUT = 0.2  # Stronger dropout on classifier head for regularization
+LABEL_SMOOTHING = 0.05  # Softens targets to improve generalization
+EARLY_STOP_PATIENCE = 2  # Stop if validation does not improve for these many epochs
+EARLY_STOP_MIN_DELTA = 1e-4  # Minimum improvement to reset patience
 FORCE_CUDA = True  # Set to True to fail fast if CUDA is unavailable
 if FORCE_CUDA:
     if not torch.cuda.is_available():

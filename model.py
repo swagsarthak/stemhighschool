@@ -3,13 +3,13 @@ import torch.nn as nn
 from transformers import BlipForQuestionAnswering
 
 class BlipForMultipleChoice(nn.Module):
-    def __init__(self, model_name, num_choices):
+    def __init__(self, model_name, num_choices, dropout_p=0.1):
         super().__init__()
         self.num_choices = num_choices
         # Load the pre-trained BLIP model for VQA
         self.blip = BlipForQuestionAnswering.from_pretrained(model_name)
         hidden_size = self.blip.config.text_config.hidden_size
-        self.dropout = nn.Dropout(p=0.1)
+        self.dropout = nn.Dropout(p=dropout_p)
         self.classifier = nn.Linear(hidden_size, 1)
 
     def forward(self, pixel_values, input_ids, attention_mask, choice_mask=None):

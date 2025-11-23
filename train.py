@@ -43,7 +43,11 @@ def train():
 
     # Load processor and model
     processor = BlipProcessor.from_pretrained(MODEL_NAME, use_fast=True)
-    model = BlipForMultipleChoice(MODEL_NAME, NUM_CHOICES).to(DEVICE)
+    model = BlipForMultipleChoice(
+        MODEL_NAME,
+        NUM_CHOICES,
+        dropout_p=MODEL_DROPOUT,
+    ).to(DEVICE)
 
     # Apply optional lighter-weight strategy (skip fine-tuning BLIP weights)
     training_strategy = TRAINING_STRATEGY.lower()
@@ -86,12 +90,13 @@ def train():
 
     total_steps = len(train_loader) * NUM_EPOCHS
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
     scaler = amp.GradScaler(device="cuda", enabled=USE_AMP and IS_CUDA)
     amp_device = "cuda" if IS_CUDA else "cpu"
     non_blocking = IS_CUDA and PIN_MEMORY
 
     best_val_accuracy = 0.0
+    epochs_without_improvement = 0
 
     # Training Loop
     for epoch in range(NUM_EPOCHS):
@@ -130,10 +135,23 @@ def train():
         wandb.log({"epoch": epoch + 1, "train_loss": avg_train_loss, "val_accuracy": val_accuracy})
 
         # Save the best model
-        if val_accuracy > best_val_accuracy:
+        improved = val_accuracy > best_val_accuracy + EARLY_STOP_MIN_DELTA
+        if improved:
             best_val_accuracy = val_accuracy
+            epochs_without_improvement = 0
             torch.save(model.state_dict(), MODEL_SAVE_PATH)
             print(f"New best model saved with accuracy: {best_val_accuracy:.4f}")
+        else:
+            epochs_without_improvement += 1
+            print(f"No improvement for {epochs_without_improvement} epoch(s).")
+
+        # Early stopping to prevent overfitting
+        if epochs_without_improvement >= EARLY_STOP_PATIENCE:
+            print(
+                f"Early stopping triggered after {epochs_without_improvement} "
+                f"epoch(s) without validation gain."
+            )
+            break
 
     wandb.finish()
     print("Training complete.")
